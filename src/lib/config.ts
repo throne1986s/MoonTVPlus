@@ -1,11 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, no-console, @typescript-eslint/no-non-null-assertion */
 
 import { db } from '@/lib/db';
+import { normalizeApiBaseUrl } from '@/lib/url';
 
 import { AdminConfig } from './admin.types';
+import { setServerTmdbImageBaseUrl } from './tmdb-image-base';
 
 const BUILTIN_DANMAKU_API_BASE = 'https://mtvpls-danmu.netlify.app/87654321';
 const DEFAULT_LIVE_REFRESH_INTERVAL_HOURS = 12;
+const DEFAULT_TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org';
 
 function normalizeLiveRefreshIntervalHours(
   refreshIntervalHours?: number
@@ -74,6 +77,24 @@ export const API_CONFIG = {
 // 在模块加载时根据环境决定配置来源
 let cachedConfig: AdminConfig;
 let configInitPromise: Promise<AdminConfig> | null = null;
+
+// 从配置文件文本里读 special_source_apis（兼容驼峰写法）
+function readSpecialSourceApisFromFile(configFile?: string): string[] {
+  if (!configFile) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(configFile) as ConfigFileStruct;
+    const list = Array.isArray(parsed.special_source_apis)
+      ? parsed.special_source_apis
+      : Array.isArray(parsed.specialSourceApis)
+      ? parsed.specialSourceApis
+      : [];
+    return list.filter((key): key is string => typeof key === 'string');
+  } catch (e) {
+    return [];
+  }
+}
 
 // 从配置文件补充管理员配置
 export function refineConfig(adminConfig: AdminConfig): AdminConfig {
@@ -265,6 +286,10 @@ async function getInitConfig(
       Announcement:
         process.env.ANNOUNCEMENT ||
         '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
+      AnnouncementDisplayMode:
+        process.env.ANNOUNCEMENT_DISPLAY_MODE === 'every'
+          ? 'every'
+          : 'once',
       SearchDownstreamMaxPage:
         Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
       SiteInterfaceCacheTime: cfgFile.cache_time || 7200,
@@ -291,6 +316,8 @@ async function getInitConfig(
       TMDBApiKey: process.env.TMDB_API_KEY || '',
       TMDBProxy: process.env.TMDB_PROXY || '',
       TMDBReverseProxy: process.env.TMDB_REVERSE_PROXY || '',
+      TMDBImageBaseUrl:
+        process.env.TMDB_IMAGE_BASE_URL || DEFAULT_TMDB_IMAGE_BASE_URL,
       // 动漫/Bangumi配置
       BangumiDataSource:
         (process.env.NEXT_PUBLIC_BANGUMI_DATA_SOURCE as any) || 'direct',
@@ -303,6 +330,9 @@ async function getInitConfig(
         process.env.NEXT_PUBLIC_BANGUMI_IMAGE_BASE_URL ||
         '',
       BangumiProxy: process.env.BANGUMI_PROXY || '',
+      LiveChartProxy: process.env.LIVECHART_PROXY || '',
+      // 本地设置云同步模式（全局）：off=关闭 manual=手动 auto=自动
+      LocalSettingsSyncMode: 'off',
       // Pansou配置
       PansouApiUrl: '',
       PansouUsername: '',
@@ -313,6 +343,7 @@ async function getInitConfig(
       MagnetMikanReverseProxy: '',
       MagnetDmhyReverseProxy: '',
       MagnetAcgripReverseProxy: '',
+      MagnetNyaaReverseProxy: '',
       // 评论功能开关
       EnableComments: false,
       EnableRegistration: false,
@@ -323,6 +354,12 @@ async function getInitConfig(
       TurnstileSiteKey: '',
       TurnstileSecretKey: '',
       DefaultUserTags: [],
+      // 流量统计配置
+      AnalyticsEnabled: false,
+      AnalyticsProvider: 'umami',
+      AnalyticsScriptUrl: '',
+      AnalyticsWebsiteId: '',
+      AnalyticsCustomScript: '',
     },
     UserConfig: {
       Users: [],
@@ -330,11 +367,25 @@ async function getInitConfig(
     SourceConfig: [],
     CustomCategories: [],
     LiveConfig: [],
+    TelegramConfig: {
+      enabled: process.env.TELEGRAM_BOT_ENABLED === 'true' || Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      botUsername: process.env.TELEGRAM_BOT_USERNAME || '',
+      webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+      apiProxy: process.env.TELEGRAM_API_PROXY || '',
+      apiBaseUrl: process.env.TELEGRAM_API_BASE_URL || '',
+      loginEnabled: process.env.TELEGRAM_LOGIN_ENABLED !== 'false',
+      bindingEnabled: process.env.TELEGRAM_BINDING_ENABLED !== 'false',
+      registrationEnabled: process.env.TELEGRAM_REGISTRATION_ENABLED === 'true',
+      notificationsEnabled: process.env.TELEGRAM_NOTIFICATIONS_ENABLED !== 'false',
+      defaultNotifications: process.env.TELEGRAM_DEFAULT_NOTIFICATIONS !== 'false',
+    },
     SpecialSourceApis: Array.isArray(cfgFile.special_source_apis)
       ? cfgFile.special_source_apis
       : Array.isArray(cfgFile.specialSourceApis)
       ? cfgFile.specialSourceApis
       : [],
+    ClientAdSourceApis: [],
   };
 
   // 用户信息已迁移到新版数据库，不再填充 UserConfig.Users
@@ -501,6 +552,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       DanmakuApiBase: BUILTIN_DANMAKU_API_BASE,
       DanmakuApiToken: '87654321',
       DanmakuAutoLoadDefault: true,
+      TMDBImageBaseUrl: DEFAULT_TMDB_IMAGE_BASE_URL,
       PansouApiUrl: '',
       PansouUsername: '',
       PansouPassword: '',
@@ -509,6 +561,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
       MagnetMikanReverseProxy: '',
       MagnetDmhyReverseProxy: '',
       MagnetAcgripReverseProxy: '',
+      MagnetNyaaReverseProxy: '',
       EnableComments: false,
       EnableRegistration: false,
       RequireRegistrationInviteCode: false,
@@ -536,9 +589,24 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   if (adminConfig.SiteConfig.DanmakuAutoLoadDefault === undefined) {
     adminConfig.SiteConfig.DanmakuAutoLoadDefault = true;
   }
+  if (adminConfig.SiteConfig.LiveChartProxy === undefined) {
+    adminConfig.SiteConfig.LiveChartProxy = process.env.LIVECHART_PROXY || '';
+  }
+  // 本地设置云同步模式兜底
+  if (
+    adminConfig.SiteConfig.LocalSettingsSyncMode !== 'manual' &&
+    adminConfig.SiteConfig.LocalSettingsSyncMode !== 'auto'
+  ) {
+    adminConfig.SiteConfig.LocalSettingsSyncMode = 'off';
+  }
   // 确保评论开关存在
   if (adminConfig.SiteConfig.EnableComments === undefined) {
     adminConfig.SiteConfig.EnableComments = false;
+  }
+  // 确保公告显示模式存在
+  if (adminConfig.SiteConfig.AnnouncementDisplayMode === undefined) {
+    adminConfig.SiteConfig.AnnouncementDisplayMode =
+      process.env.ANNOUNCEMENT_DISPLAY_MODE === 'every' ? 'every' : 'once';
   }
   if (adminConfig.SiteConfig.EnableRegistration === undefined) {
     adminConfig.SiteConfig.EnableRegistration = false;
@@ -564,6 +632,41 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   if (adminConfig.SiteConfig.DefaultUserTags === undefined) {
     adminConfig.SiteConfig.DefaultUserTags = [];
   }
+  // 流量统计配置补全
+  if (adminConfig.SiteConfig.AnalyticsEnabled === undefined) {
+    adminConfig.SiteConfig.AnalyticsEnabled = false;
+  }
+  if (adminConfig.SiteConfig.AnalyticsProvider === undefined) {
+    adminConfig.SiteConfig.AnalyticsProvider = 'umami';
+  }
+  if (adminConfig.SiteConfig.AnalyticsScriptUrl === undefined) {
+    adminConfig.SiteConfig.AnalyticsScriptUrl = '';
+  }
+  if (adminConfig.SiteConfig.AnalyticsWebsiteId === undefined) {
+    adminConfig.SiteConfig.AnalyticsWebsiteId = '';
+  }
+  if (adminConfig.SiteConfig.AnalyticsCustomScript === undefined) {
+    adminConfig.SiteConfig.AnalyticsCustomScript = '';
+  }
+  if (!adminConfig.TelegramConfig) {
+    adminConfig.TelegramConfig = {
+      enabled: process.env.TELEGRAM_BOT_ENABLED === 'true' || Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      botUsername: process.env.TELEGRAM_BOT_USERNAME || '',
+      webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+      apiProxy: process.env.TELEGRAM_API_PROXY || '',
+      apiBaseUrl: process.env.TELEGRAM_API_BASE_URL || '',
+      loginEnabled: process.env.TELEGRAM_LOGIN_ENABLED !== 'false',
+      bindingEnabled: process.env.TELEGRAM_BINDING_ENABLED !== 'false',
+      registrationEnabled: process.env.TELEGRAM_REGISTRATION_ENABLED === 'true',
+      notificationsEnabled: process.env.TELEGRAM_NOTIFICATIONS_ENABLED !== 'false',
+      defaultNotifications: process.env.TELEGRAM_DEFAULT_NOTIFICATIONS !== 'false',
+    };
+  }
+  if (adminConfig.TelegramConfig.registrationEnabled === undefined) {
+    adminConfig.TelegramConfig.registrationEnabled =
+      process.env.TELEGRAM_REGISTRATION_ENABLED === 'true';
+  }
   if (adminConfig.SiteConfig.PansouKeywordBlocklist === undefined) {
     adminConfig.SiteConfig.PansouKeywordBlocklist = '';
   }
@@ -578,6 +681,9 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   }
   if (adminConfig.SiteConfig.MagnetAcgripReverseProxy === undefined) {
     adminConfig.SiteConfig.MagnetAcgripReverseProxy = '';
+  }
+  if (adminConfig.SiteConfig.MagnetNyaaReverseProxy === undefined) {
+    adminConfig.SiteConfig.MagnetNyaaReverseProxy = '';
   }
   if (!adminConfig.UserConfig) {
     adminConfig.UserConfig = { Users: [] };
@@ -600,11 +706,22 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   if (!adminConfig.LiveConfig || !Array.isArray(adminConfig.LiveConfig)) {
     adminConfig.LiveConfig = [];
   }
+  // 区分「老库没有这个字段」(undefined → 需从配置文件兜底补齐)
+  // 与「后台显式清空」(空数组 → 尊重用户的选择，不再回填)
+  const specialSourceApisWasAbsent = !Array.isArray(
+    adminConfig.SpecialSourceApis
+  );
   if (
     !adminConfig.SpecialSourceApis ||
     !Array.isArray(adminConfig.SpecialSourceApis)
   ) {
     adminConfig.SpecialSourceApis = [];
+  }
+  if (
+    !adminConfig.ClientAdSourceApis ||
+    !Array.isArray(adminConfig.ClientAdSourceApis)
+  ) {
+    adminConfig.ClientAdSourceApis = [];
   }
   adminConfig.LiveRefreshIntervalHours = normalizeLiveRefreshIntervalHours(
     adminConfig.LiveRefreshIntervalHours
@@ -633,6 +750,27 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
     if (adminConfig.OpenListConfig.OfflineDownloadPassword === undefined) {
       adminConfig.OpenListConfig.OfflineDownloadPassword = '';
     }
+    if (adminConfig.OpenListConfig.PathMeta === undefined) {
+      adminConfig.OpenListConfig.PathMeta = {};
+    } else {
+      // 补齐新字段默认值（代理播放开关、缓存时长）
+      // 旧配置可能缺少新字段，运行期做兜底（类型上已声明为必填）
+      for (const entry of Object.values(
+        adminConfig.OpenListConfig.PathMeta
+      ) as Array<{
+        category: string;
+        refresh14m: boolean;
+        proxyPlay?: boolean;
+        proxyCacheMinutes?: number;
+      }>) {
+        if (entry.proxyPlay === undefined) {
+          entry.proxyPlay = false;
+        }
+        if (entry.proxyCacheMinutes === undefined) {
+          entry.proxyCacheMinutes = 60;
+        }
+      }
+    }
   }
 
   // 用户信息已迁移到新版数据库
@@ -657,8 +795,19 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   });
 
   const validSourceKeys = new Set(adminConfig.SourceConfig.map((source) => source.key));
+  // 配置文件是采集源的权威来源，special_source_apis 同理：**老库缺字段时**从 ConfigFile 补齐。
+  // 只在字段缺失时回填——否则后台把特殊源全部取消勾选（存成空数组）后，
+  // 每次 getConfig() 都会被配置文件又捞回来，等于关不掉。
+  if (specialSourceApisWasAbsent) {
+    adminConfig.SpecialSourceApis = readSpecialSourceApisFromFile(
+      adminConfig.ConfigFile
+    );
+  }
   adminConfig.SpecialSourceApis = Array.from(
     new Set((adminConfig.SpecialSourceApis || []).filter((key) => validSourceKeys.has(key)))
+  );
+  adminConfig.ClientAdSourceApis = Array.from(
+    new Set((adminConfig.ClientAdSourceApis || []).filter((key) => validSourceKeys.has(key)))
   );
 
   // 自定义分类去重
@@ -702,6 +851,7 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
             UserId: oldConfig.UserId,
             AuthToken: oldConfig.AuthToken,
             Libraries: oldConfig.Libraries,
+            embyAuthorizationHeader: oldConfig.embyAuthorizationHeader,
             LastSyncTime: oldConfig.LastSyncTime,
             ItemCount: oldConfig.ItemCount,
             isDefault: true,
@@ -965,6 +1115,116 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
     }
   }
 
+  // API Base URL 统一去尾斜杠，避免拼接路径时出现 //
+  const site = adminConfig.SiteConfig;
+  if (site) {
+    site.DoubanProxy = normalizeApiBaseUrl(site.DoubanProxy);
+    site.DoubanImageProxy = normalizeApiBaseUrl(site.DoubanImageProxy);
+    site.DanmakuApiBase = normalizeApiBaseUrl(site.DanmakuApiBase);
+    site.TMDBProxy = normalizeApiBaseUrl(site.TMDBProxy);
+    site.TMDBReverseProxy = normalizeApiBaseUrl(site.TMDBReverseProxy);
+    site.TMDBImageBaseUrl = normalizeApiBaseUrl(
+      site.TMDBImageBaseUrl || DEFAULT_TMDB_IMAGE_BASE_URL
+    );
+    site.BangumiApiBaseUrl = normalizeApiBaseUrl(site.BangumiApiBaseUrl);
+    site.BangumiImageBaseUrl = normalizeApiBaseUrl(site.BangumiImageBaseUrl);
+    site.BangumiProxy = normalizeApiBaseUrl(site.BangumiProxy);
+    site.LiveChartProxy = normalizeApiBaseUrl(site.LiveChartProxy);
+    site.PansouApiUrl = normalizeApiBaseUrl(site.PansouApiUrl);
+    site.MagnetProxy = normalizeApiBaseUrl(site.MagnetProxy);
+    site.MagnetMikanReverseProxy = normalizeApiBaseUrl(
+      site.MagnetMikanReverseProxy
+    );
+    site.MagnetDmhyReverseProxy = normalizeApiBaseUrl(
+      site.MagnetDmhyReverseProxy
+    );
+    site.MagnetAcgripReverseProxy = normalizeApiBaseUrl(
+      site.MagnetAcgripReverseProxy
+    );
+    site.MagnetNyaaReverseProxy = normalizeApiBaseUrl(
+      site.MagnetNyaaReverseProxy
+    );
+    site.OIDCIssuer = normalizeApiBaseUrl(site.OIDCIssuer);
+  }
+
+  if (adminConfig.OpenListConfig) {
+    adminConfig.OpenListConfig.URL = normalizeApiBaseUrl(
+      adminConfig.OpenListConfig.URL
+    );
+    adminConfig.OpenListConfig.OfflineDownloadURL = normalizeApiBaseUrl(
+      adminConfig.OpenListConfig.OfflineDownloadURL
+    );
+  }
+
+  if (adminConfig.MusicConfig) {
+    adminConfig.MusicConfig.BaseUrl = normalizeApiBaseUrl(
+      adminConfig.MusicConfig.BaseUrl
+    );
+  }
+
+  if (adminConfig.XiaoyaConfig) {
+    adminConfig.XiaoyaConfig.ServerURL = normalizeApiBaseUrl(
+      adminConfig.XiaoyaConfig.ServerURL
+    );
+  }
+
+  if (adminConfig.SuwayomiConfig) {
+    adminConfig.SuwayomiConfig.ServerURL = normalizeApiBaseUrl(
+      adminConfig.SuwayomiConfig.ServerURL
+    );
+  }
+
+  if (adminConfig.EmbyConfig) {
+    if (adminConfig.EmbyConfig.ServerURL) {
+      adminConfig.EmbyConfig.ServerURL = normalizeApiBaseUrl(
+        adminConfig.EmbyConfig.ServerURL
+      );
+    }
+    if (Array.isArray(adminConfig.EmbyConfig.Sources)) {
+      adminConfig.EmbyConfig.Sources = adminConfig.EmbyConfig.Sources.map(
+        (source) => ({
+          ...source,
+          ServerURL: normalizeApiBaseUrl(source.ServerURL),
+        })
+      );
+    }
+  }
+
+  if (adminConfig.AIConfig) {
+    adminConfig.AIConfig.OpenAIBaseURL = normalizeApiBaseUrl(
+      adminConfig.AIConfig.OpenAIBaseURL
+    );
+    adminConfig.AIConfig.ClaudeBaseURL = normalizeApiBaseUrl(
+      adminConfig.AIConfig.ClaudeBaseURL
+    );
+    adminConfig.AIConfig.CustomBaseURL = normalizeApiBaseUrl(
+      adminConfig.AIConfig.CustomBaseURL
+    );
+    adminConfig.AIConfig.DecisionOpenAIBaseURL = normalizeApiBaseUrl(
+      adminConfig.AIConfig.DecisionOpenAIBaseURL
+    );
+    adminConfig.AIConfig.DecisionCustomBaseURL = normalizeApiBaseUrl(
+      adminConfig.AIConfig.DecisionCustomBaseURL
+    );
+    // 新版工具式调用：补充默认值，避免旧存储配置未定义
+    adminConfig.AIConfig.EnableNewMode = adminConfig.AIConfig.EnableNewMode ?? true;
+    adminConfig.AIConfig.NewProtocol =
+      adminConfig.AIConfig.NewProtocol ?? 'openai-completions';
+    adminConfig.AIConfig.MaxContext = adminConfig.AIConfig.MaxContext ?? 131072;
+    adminConfig.AIConfig.CompressThreshold = adminConfig.AIConfig.CompressThreshold ?? 90;
+  }
+
+  if (adminConfig.TelegramConfig) {
+    adminConfig.TelegramConfig.apiBaseUrl = normalizeApiBaseUrl(
+      adminConfig.TelegramConfig.apiBaseUrl
+    );
+  }
+
+  // 同步 TMDB 图片默认地址到轻量模块，供 getTMDBImageUrl 等服务端图片拼接使用
+  setServerTmdbImageBaseUrl(adminConfig.SiteConfig?.TMDBImageBaseUrl);
+
+  // 注意：OPDS source.url 是完整目录 URL，保留末尾 / 以便相对路径解析
+
   return adminConfig;
 }
 
@@ -995,14 +1255,13 @@ export async function getCacheTime(): Promise<number> {
 
 export async function getAvailableApiSites(
   user?: string,
-  includeSpecialSources = false
+  specialOnly = false
 ): Promise<ApiSite[]> {
   const config = await getConfig();
   const specialSourceSet = new Set(config.SpecialSourceApis || []);
+  // 双向隔离：普通入口只给普通源，/under 入口只给特殊源
   const filterSpecialSources = <T extends { key: string }>(sites: T[]): T[] =>
-    includeSpecialSources
-      ? sites
-      : sites.filter((site) => !specialSourceSet.has(site.key));
+    sites.filter((site) => specialSourceSet.has(site.key) === specialOnly);
   const allApiSites = filterSpecialSources(
     config.SourceConfig.filter((s) => !s.disabled)
   );
